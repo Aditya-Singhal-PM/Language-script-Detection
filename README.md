@@ -98,6 +98,24 @@ the server instance restarted — re-submit the document.
 ### `GET /api/health`
 Returns `{"status": "ok"}` — for load balancer / deploy-platform health checks.
 
+### Speeding up processing (CPU count + concurrency)
+
+Pages are processed concurrently — up to `OCR_MAX_WORKERS` at a time
+(default: `min(4, CPU cores available, page count)`) — since each page's
+OCR work is independent. **This only pays off if the Cloud Run service
+actually has more than 1 vCPU allocated.** With 1 vCPU, extra worker
+threads compete for the same core and add scheduling overhead instead of
+helping — sometimes making things slightly *slower*, not faster. The fix
+for "processing is slow" is to raise vCPU count on the Cloud Run service
+(Containers tab → CPU), not just leave it at the default 1.
+
+Rough guide: 2 vCPU lets 2 pages genuinely OCR at once, 4 vCPU lets up to
+4 (the code's own default cap). Beyond 4 concurrent pages the code won't
+use more without also raising `OCR_MAX_WORKERS` as an env var. Cloud
+Run bills per vCPU-second, so more vCPUs costs more while an instance is
+running — weigh that against how often documents are large enough for
+this to matter.
+
 ### Cloud Run specific setting this requires
 
 By default, Cloud Run only allocates CPU to an instance **while it's
