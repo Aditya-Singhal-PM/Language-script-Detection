@@ -25,6 +25,7 @@ import io
 import os
 import re
 import statistics
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -571,15 +572,28 @@ def densify_gaps(sampled_results: list[PageResult], total_pages: int) -> list[in
 # Top-level orchestration
 # ---------------------------------------------------------------------------
 
-def analyze_pdf(file_path: str, on_total_known=None, on_page_done=None) -> DocumentReport:
+def analyze_pdf(file_path: str, on_total_known=None, on_page_done=None, max_workers: Optional[int] = None) -> DocumentReport:
     """on_total_known(total_pages) fires once, as soon as the page count
     is known (before any processing). on_page_done(PageResult) fires once
     per page as it finishes - including the extra pages processed during
     adaptive densification. Both are optional; used by the web app to
     stream live progress to the frontend instead of leaving the person
-    watching a static spinner for however long OCR takes."""
+    watching a static spinner for however long OCR takes.
+
+    Pages are processed CONCURRENTLY, up to max_workers at a time (default:
+    min(4, CPU count available, page count) - see OCR_MAX_WORKERS in the
+    README for how to tune this). Each worker opens its own PyMuPDF
+    Document rather than sharing one across threads, since that's the
+    pattern PyMuPDF's own docs guarantee is safe. This is the main lever
+    for wall-clock speed on a multi-page scanned document: pages are
+    otherwise independent CPU-bound work, so give it more vCPUs on
+    Cloud Run AND this concurrency actually uses them - previously the
+    code was single-threaded, so extra vCPUs sat idle regardless of how
+    many you paid for.
+    """
     doc = open_pdf(file_path)
     total_pages = doc.page_count
+    doc.close()
     if on_total_known:
         on_total_known(total_pages)
     warnings = []
@@ -587,18 +601,35 @@ def analyze_pdf(file_path: str, on_total_known=None, on_page_done=None) -> Docum
     sample_pages = choose_sample_pages(total_pages)
     results: dict[int, PageResult] = {}
 
-    def process(page_num: int):
-        page = doc[page_num - 1]
-        if page_has_extractable_text(page):
-            results[page_num] = process_native_text_page(page_num, get_native_text(page))
-        else:
-            image = render_page_to_image(page)
-            results[page_num] = process_scanned_page(page_num, image)
-        if on_page_done:
-            on_page_done(results[page_num])
+    def process_one(page_num: int) -> PageResult:
+        local_doc = open_pdf(file_path)
+        try:
+            page = local_doc[page_num - 1]
+            if page_has_extractable_text(page):
+                return process_native_text_page(page_num, get_native_text(page))
+            else:
+                image = render_page_to_image(page)
+                return process_scanned_page(page_num, image)
+        finally:
+            local_doc.close()
 
-    for p in sample_pages:
-        process(p)
+    def process_batch(page_nums: list[int]):
+        workers = max_workers or int(os.environ.get("OCR_MAX_WORKERS", min(4, os.cpu_count() or 1)))
+        workers = max(1, min(workers, len(page_nums)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(process_one, p): p for p in page_nums}
+            # as_completed yields whichever page finishes first, not in
+            # page-number order - that's fine and even desirable: it's
+            # exactly what lets the live-progress UI show real completion
+            # order rather than an artificially imposed one.
+            for future in as_completed(futures):
+                p = futures[future]
+                result = future.result()
+                results[p] = result
+                if on_page_done:
+                    on_page_done(result)
+
+    process_batch(sample_pages)
 
     # Adaptive densification pass
     extra = densify_gaps(list(results.values()), total_pages)
@@ -607,8 +638,7 @@ def analyze_pdf(file_path: str, on_total_known=None, on_page_done=None) -> Docum
             f"Detected a language change between sampled pages — densified {len(extra)} "
             f"additional page(s) to locate the transition: {extra}"
         )
-        for p in extra:
-            process(p)
+        process_batch(extra)
 
     all_results = [results[p] for p in sorted(results.keys())]
     summary = summarize_languages(all_results, total_pages)
