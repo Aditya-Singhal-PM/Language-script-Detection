@@ -119,6 +119,54 @@
     opacity: 0.7;
   }
 
+  /* Live progress (during processing) */
+  #liveProgress {
+    display: none;
+    margin-top: 32px;
+  }
+
+  #liveProgress .progress-label {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    color: var(--ink-soft);
+    margin-bottom: 10px;
+  }
+
+  .progress-track {
+    height: 6px;
+    background: var(--border);
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 24px;
+  }
+
+  .progress-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.4s ease;
+  }
+
+  .live-page-row {
+    display: grid;
+    grid-template-columns: 56px 1fr auto;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-bottom: 1px solid var(--border);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    animation: fadeIn 0.3s ease;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .live-page-row .pg { color: var(--ink); font-weight: 500; }
+  .live-page-row .script-tag { color: var(--accent); }
+  .live-page-row .langs { color: var(--ink-soft); text-align: right; }
+
   /* Error */
   #errorBox {
     display: none;
@@ -299,6 +347,12 @@
       <span class="dots">Reading and analyzing document</span>
       <span class="elapsed" id="elapsedTime"></span>
     </div>
+
+    <div id="liveProgress">
+      <div class="progress-label" id="progressLabel">Processing...</div>
+      <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+      <div id="livePageList"></div>
+    </div>
     <div id="errorBox"></div>
 
     <div id="results">
@@ -355,6 +409,8 @@ async function handleFile(file) {
   errorBox.style.display = 'none';
   results.style.display = 'none';
   processing.style.display = 'block';
+  renderedPageNums.clear();
+  document.getElementById('livePageList').innerHTML = '';
   startElapsedClock();
 
   const formData = new FormData();
@@ -391,8 +447,49 @@ function startElapsedClock() {
 
 function stopProcessing() {
   processing.style.display = 'none';
+  document.getElementById('liveProgress').style.display = 'none';
+  document.getElementById('livePageList').innerHTML = '';
   if (pollTimer) clearTimeout(pollTimer);
   if (elapsedTimer) clearInterval(elapsedTimer);
+}
+
+const renderedPageNums = new Set();
+
+function renderLiveProgress(data) {
+  const pages = data.pages || [];
+  const total = data.total_units;
+  const liveEl = document.getElementById('liveProgress');
+  liveEl.style.display = 'block';
+
+  const label = document.getElementById('progressLabel');
+  const fill = document.getElementById('progressFill');
+  if (total) {
+    label.textContent = `Processed ${pages.length} of ${total}`;
+    fill.style.width = Math.min(100, (pages.length / total) * 100) + '%';
+  } else {
+    label.textContent = 'Reading document...';
+    fill.style.width = '5%';
+  }
+
+  const list = document.getElementById('livePageList');
+  // Only append rows for pages we haven't already shown - avoids
+  // re-rendering (and re-animating) the whole list on every poll.
+  const sorted = [...pages].sort((a, b) => a.page_num - b.page_num);
+  for (const p of sorted) {
+    if (renderedPageNums.has(p.page_num)) continue;
+    renderedPageNums.add(p.page_num);
+
+    const langsText = (p.languages || []).map(l => `${l[0]} (${l[1].toFixed(2)})`).join(', ') || (p.note || 'no language found');
+    const scriptText = p.script ? `[${p.script}]` : (p.source === 'native_text' ? '[text]' : '');
+
+    const row = document.createElement('div');
+    row.className = 'live-page-row';
+    row.innerHTML = `
+      <span class="pg">p.${p.page_num}</span>
+      <span class="script-tag">${scriptText}</span>
+      <span class="langs">${langsText}</span>`;
+    list.appendChild(row);
+  }
 }
 
 async function pollJob(jobId, startedAt) {
@@ -412,6 +509,7 @@ async function pollJob(jobId, startedAt) {
     const data = await res.json();
 
     if (data.status === 'processing') {
+      renderLiveProgress(data);
       pollTimer = setTimeout(() => pollJob(jobId, startedAt), POLL_INTERVAL_MS);
       return;
     }
