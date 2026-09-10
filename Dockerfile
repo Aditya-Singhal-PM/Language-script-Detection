@@ -14,6 +14,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tesseract-ocr-rus \
     tesseract-ocr-hin \
     tesseract-ocr-kor \
+    tesseract-ocr-ell \
+    tesseract-ocr-heb \
+    tesseract-ocr-tha \
+    tesseract-ocr-ben \
+    tesseract-ocr-tam \
+    tesseract-ocr-tel \
+    tesseract-ocr-kan \
+    tesseract-ocr-mal \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /srv

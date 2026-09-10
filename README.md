@@ -12,7 +12,9 @@ pip install -r requirements.txt
 # Tesseract + language packs (same as the CLI prototype):
 apt-get install tesseract-ocr tesseract-ocr-chi-sim tesseract-ocr-chi-tra \
     tesseract-ocr-jpn tesseract-ocr-ara tesseract-ocr-fra tesseract-ocr-deu \
-    tesseract-ocr-spa tesseract-ocr-rus tesseract-ocr-hin tesseract-ocr-kor
+    tesseract-ocr-spa tesseract-ocr-rus tesseract-ocr-hin tesseract-ocr-kor \
+    tesseract-ocr-ell tesseract-ocr-heb tesseract-ocr-tha tesseract-ocr-ben \
+    tesseract-ocr-tam tesseract-ocr-tel tesseract-ocr-kan tesseract-ocr-mal
 
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
@@ -156,18 +158,31 @@ For a plain VM: `docker run -d -p 80:8000 --restart unless-stopped doc-lang-app`
   exposing it publicly.
 - **No history/database of past analyses** — each job is discarded after
   its TTL. Fine for a quick tool; add persistence if you want a record.
-- Arabic routing is implemented per the design but still untested
-  end-to-end (no Arabic-capable font was available to generate a
-  synthetic sample) — test against a real Arabic document before relying
-  on it. **Update:** the Japanese-vs-Chinese script routing *was*
-  incorrectly untested in the same way, and it turned out to have a real
-  bug (Tesseract's OSD reports a page as `"Japanese"` as its own distinct
-  label, separate from `"Han"` — the code only ever checked for `"Han"`,
-  so Japanese pages silently fell through to the Latin-language OCR path
-  and produced confident-looking garbage in German/Hungarian/Catalan).
-  Found and fixed once tested against a real scanned Japanese contract.
-  Worth remembering as a pattern: synthetic test images are useful but
-  don't reliably exercise every code path a real scan will.
+- **Script coverage was incomplete and is now verified.** `verify_osd_scripts.py`
+  renders a sample per script, asks OSD what label it emits, and checks
+  each label has an explicit route. Run it after a Tesseract upgrade.
+  Auditing this found **seven unrouted labels** beyond the Japanese bug:
+  `Korean` (the code only had `Hangul` — OSD actually emits `Korean`),
+  plus `Greek`, `Thai`, `Bengali`, `Tamil`, `Telugu`, `Kannada`, and
+  `Malayalam`, none of which were handled at all. Each was silently
+  falling through to the Latin branch. All are now routed with their
+  language packs added to the Dockerfile.
+- **OSD's own confusions that no amount of routing can fix** (surfaced by
+  the verify script, worth knowing before trusting a result):
+  - **Hebrew is reported as `Cyrillic`** by OSD. A Hebrew document will
+    therefore be OCR'd with the Russian model and produce nonsense. If
+    you need Hebrew, add a Unicode-range pre-check ahead of the OSD call.
+  - **Kanji-only Japanese is reported as `Han`**, not `Japanese`. The
+    kana check catches Japanese *with* kana, but a page of pure kanji
+    (common in formal/legal Japanese headings) will be labelled Chinese.
+    Your test contract worked because most pages did contain kana.
+  - OSD needs a reasonable amount of text; single-line blocks fall back
+    to a Unicode-composition probe that's good but not infallible.
+- Arabic routing is implemented and its OSD label verified, but not
+  tested end-to-end for OCR *accuracy* (no Arabic text font available
+  here to generate a legible sample) — check against a real Arabic
+  document before relying on it. Same for Bengali/Kannada/Malayalam:
+  label routing verified, OCR accuracy unverified.
 - Simplified vs. Traditional Chinese detection is a lightweight
   character-set heuristic, not exhaustive.
 - Free Tesseract accuracy on poor-quality/faint scans will be
