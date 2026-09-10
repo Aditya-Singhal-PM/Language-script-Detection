@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Document Language Identifier</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #FAFAF8;
+    --ink: #1A1C22;
+    --ink-soft: #565A63;
+    --accent: #2F5D50;
+    --accent-soft: #E4ECE9;
+    --border: #DEDBD3;
+    --amber: #9A6B00;
+    --amber-soft: #F6EEDC;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: 'Inter', sans-serif;
+    line-height: 1.5;
+  }
+
+  .wrap {
+    max-width: 680px;
+    margin: 0 auto;
+    padding: 72px 24px 120px;
+  }
+
+  header {
+    margin-bottom: 48px;
+  }
+
+  h1 {
+    font-family: 'Source Serif 4', serif;
+    font-weight: 600;
+    font-size: 34px;
+    margin: 0 0 12px;
+    letter-spacing: -0.01em;
+  }
+
+  header p {
+    color: var(--ink-soft);
+    font-size: 16px;
+    margin: 0;
+    max-width: 50ch;
+  }
+
+  /* Drop zone */
+  #dropzone {
+    border: 1.5px dashed var(--border);
+    border-radius: 4px;
+    padding: 56px 24px;
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+  }
+
+  #dropzone.dragover {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+  }
+
+  #dropzone .icon {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    color: var(--ink-soft);
+    letter-spacing: 0.02em;
+    margin-bottom: 16px;
+  }
+
+  #dropzone .primary {
+    font-size: 17px;
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+
+  #dropzone .secondary {
+    color: var(--ink-soft);
+    font-size: 14px;
+  }
+
+  #fileInput { display: none; }
+
+  /* Processing state */
+  #processing {
+    display: none;
+    padding: 40px 0;
+    text-align: center;
+    color: var(--ink-soft);
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 14px;
+  }
+
+  #processing .dots::after {
+    content: '';
+    animation: dots 1.4s steps(4, end) infinite;
+  }
+
+  @keyframes dots {
+    0%, 20% { content: ''; }
+    40% { content: '.'; }
+    60% { content: '..'; }
+    80%, 100% { content: '...'; }
+  }
+
+  /* Error */
+  #errorBox {
+    display: none;
+    margin-top: 24px;
+    padding: 16px 20px;
+    background: #FBEAEA;
+    border: 1px solid #E3B4B4;
+    border-radius: 4px;
+    color: #7A2323;
+    font-size: 14px;
+  }
+
+  /* Results */
+  #results { display: none; margin-top: 48px; }
+
+  #results .file-meta {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    color: var(--ink-soft);
+    margin-bottom: 24px;
+    word-break: break-all;
+  }
+
+  .proportion-bar {
+    display: flex;
+    height: 10px;
+    border-radius: 3px;
+    overflow: hidden;
+    margin-bottom: 20px;
+    background: var(--border);
+  }
+
+  .proportion-bar div { height: 100%; }
+
+  .lang-list {
+    list-style: none;
+    margin: 0 0 40px;
+    padding: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .lang-list li {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    padding: 14px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .lang-name {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .lang-swatch {
+    width: 10px;
+    height: 10px;
+    border-radius: 2px;
+    display: inline-block;
+  }
+
+  .lang-code {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 13px;
+    color: var(--ink-soft);
+  }
+
+  .lang-pct {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 15px;
+    font-weight: 500;
+  }
+
+  .lang-conf {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12px;
+    color: var(--ink-soft);
+    margin-left: 10px;
+  }
+
+  .warnings {
+    background: var(--amber-soft);
+    border: 1px solid #E4D2A0;
+    border-radius: 4px;
+    padding: 14px 18px;
+    font-size: 13.5px;
+    color: var(--amber);
+    margin-bottom: 32px;
+  }
+
+  details {
+    border-top: 1px solid var(--border);
+  }
+
+  summary {
+    padding: 14px 0;
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--ink-soft);
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  summary::-webkit-details-marker { display: none; }
+
+  summary::before {
+    content: '+';
+    font-family: 'IBM Plex Mono', monospace;
+    width: 14px;
+  }
+
+  details[open] summary::before { content: '–'; }
+
+  .page-log {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 12.5px;
+    line-height: 1.7;
+    padding-bottom: 24px;
+  }
+
+  .page-row {
+    display: grid;
+    grid-template-columns: 60px 70px 1fr;
+    gap: 12px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    color: var(--ink-soft);
+  }
+
+  .page-row .pg { color: var(--ink); }
+  .page-row .src { color: var(--accent); }
+
+  #resetBtn {
+    margin-top: 32px;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 10px 18px;
+    font-family: 'Inter', sans-serif;
+    font-size: 13.5px;
+    color: var(--ink-soft);
+    cursor: pointer;
+  }
+
+  #resetBtn:hover { border-color: var(--ink-soft); color: var(--ink); }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Document Language Identifier</h1>
+      <p>Drop in a Word document or PDF — text-based or scanned — and see the probable language or languages it contains, with a page-by-page breakdown.</p>
+    </header>
+
+    <div id="dropzone">
+      <div class="icon">.PDF&nbsp;&nbsp;·&nbsp;&nbsp;.DOCX</div>
+      <div class="primary">Drop a document here, or click to choose one</div>
+      <div class="secondary">Scanned PDFs are OCR'd automatically. Max 25&nbsp;MB.</div>
+      <input type="file" id="fileInput" accept=".pdf,.docx">
+    </div>
+
+    <div id="processing"><span class="dots">Reading and analyzing document</span></div>
+    <div id="errorBox"></div>
+
+    <div id="results">
+      <div class="file-meta" id="fileMeta"></div>
+      <div class="proportion-bar" id="proportionBar"></div>
+      <ul class="lang-list" id="langList"></ul>
+      <div class="warnings" id="warningsBox" style="display:none;"></div>
+      <details>
+        <summary id="pageLogSummary">Per-page detail</summary>
+        <div class="page-log" id="pageLog"></div>
+      </details>
+      <button id="resetBtn">Analyze another document</button>
+    </div>
+  </div>
+
+<script>
+const PALETTE = ['#2F5D50', '#9A6B00', '#5B4B8A', '#3B6E9C', '#A34E3A', '#6B7A3F'];
+
+const dropzone = document.getElementById('dropzone');
+const fileInput = document.getElementById('fileInput');
+const processing = document.getElementById('processing');
+const errorBox = document.getElementById('errorBox');
+const results = document.getElementById('results');
+const resetBtn = document.getElementById('resetBtn');
+
+dropzone.addEventListener('click', () => fileInput.click());
+dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('dragover'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('dragover'));
+dropzone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropzone.classList.remove('dragover');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+});
+fileInput.addEventListener('change', () => {
+  if (fileInput.files.length) handleFile(fileInput.files[0]);
+});
+resetBtn.addEventListener('click', resetUI);
+
+function resetUI() {
+  results.style.display = 'none';
+  errorBox.style.display = 'none';
+  dropzone.style.display = 'block';
+  fileInput.value = '';
+}
+
+async function handleFile(file) {
+  dropzone.style.display = 'none';
+  errorBox.style.display = 'none';
+  results.style.display = 'none';
+  processing.style.display = 'block';
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  try {
+    const res = await fetch('/api/analyze', { method: 'POST', body: formData });
+    const data = await res.json();
+    processing.style.display = 'none';
+
+    if (!res.ok) {
+      showError(data.detail || 'Something went wrong analyzing this document.');
+      return;
+    }
+    renderResults(data);
+  } catch (err) {
+    processing.style.display = 'none';
+    showError('Could not reach the analysis service. Check your connection and try again.');
+  }
+}
+
+function showError(message) {
+  errorBox.textContent = message;
+  errorBox.style.display = 'block';
+  dropzone.style.display = 'block';
+}
+
+function renderResults(data) {
+  document.getElementById('fileMeta').textContent =
+    `${data.file_path} — ${data.total_pages} page(s)/unit(s), ${data.pages_processed.length} processed`;
+
+  const langEntries = Object.entries(data.language_summary);
+  const bar = document.getElementById('proportionBar');
+  const list = document.getElementById('langList');
+  bar.innerHTML = '';
+  list.innerHTML = '';
+
+  if (langEntries.length === 0) {
+    list.innerHTML = '<li>No language could be confidently detected.</li>';
+  }
+
+  langEntries.forEach(([lang, stats], i) => {
+    const color = PALETTE[i % PALETTE.length];
+
+    const seg = document.createElement('div');
+    seg.style.width = stats.pct_of_processed_units + '%';
+    seg.style.background = color;
+    bar.appendChild(seg);
+
+    const li = document.createElement('li');
+    li.innerHTML = `
+      <span class="lang-name">
+        <span class="lang-swatch" style="background:${color}"></span>
+        ${languageDisplayName(lang)} <span class="lang-code">${lang}</span>
+      </span>
+      <span>
+        <span class="lang-pct">${stats.pct_of_processed_units}%</span>
+        <span class="lang-conf">avg. confidence ${stats.avg_confidence}</span>
+      </span>`;
+    list.appendChild(li);
+  });
+
+  const warningsBox = document.getElementById('warningsBox');
+  if (data.warnings && data.warnings.length) {
+    warningsBox.style.display = 'block';
+    warningsBox.innerHTML = data.warnings.map(w => `<div>${w}</div>`).join('');
+  } else {
+    warningsBox.style.display = 'none';
+  }
+
+  const pageLog = document.getElementById('pageLog');
+  pageLog.innerHTML = data.page_results.map(r => {
+    const langs = (r.languages || []).map(l => `${l[0]} (${l[1].toFixed(2)})`).join(', ') || (r.note || '—');
+    return `<div class="page-row">
+      <span class="pg">p.${r.page_num}</span>
+      <span class="src">${r.source === 'ocr' ? 'OCR' : 'text'}</span>
+      <span>${langs}</span>
+    </div>`;
+  }).join('');
+  document.getElementById('pageLogSummary').textContent = `Per-page detail (${data.page_results.length})`;
+
+  results.style.display = 'block';
+}
+
+const LANG_NAMES = {
+  en: 'English', fr: 'French', de: 'German', es: 'Spanish', it: 'Italian',
+  pt: 'Portuguese', ru: 'Russian', ar: 'Arabic', fa: 'Persian', ur: 'Urdu',
+  hi: 'Hindi', ko: 'Korean', ja: 'Japanese', 'zh-cn': 'Chinese (Simplified)',
+  'zh-tw': 'Chinese (Traditional)',
+};
+function languageDisplayName(code) {
+  return LANG_NAMES[code] || code;
+}
+</script>
+</body>
+</html>
