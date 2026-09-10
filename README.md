@@ -47,7 +47,10 @@ curl -X POST http://localhost:8000/api/analyze -F "file=@contract.pdf"
 ```
 
 ### `GET /api/jobs/{job_id}`
-Poll this until `status` is `done` or `error`.
+Poll this until `status` is `done` or `error`. While `status` is
+`processing`, `total_units` and `pages` fill in incrementally as each
+page/chunk finishes — this is what lets the frontend show live per-page
+results instead of a blank spinner for however long OCR takes.
 
 ```bash
 curl http://localhost:8000/api/jobs/b88ed778f3d44037a162c327bb8d3bd2
@@ -56,7 +59,13 @@ curl http://localhost:8000/api/jobs/b88ed778f3d44037a162c327bb8d3bd2
 {
   "status": "processing",
   "result": null,
-  "error": null
+  "error": null,
+  "total_units": 6,
+  "pages": [
+    {"page_num": 1, "source": "ocr", "script": "Japanese",
+     "languages": [["ja", 0.999]], "language_scripts": {"ja": "Japanese"},
+     "text_sample": "...", "note": ""}
+  ]
 }
 ```
 Once finished:
@@ -69,15 +78,18 @@ Once finished:
     "pages_processed": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
     "page_results": [
       {"page_num": 1, "source": "native_text", "script": null,
-       "languages": [["en", 0.999]], "text_sample": "This agreement is entered into...", "note": ""}
+       "languages": [["en", 0.999]], "language_scripts": {},
+       "text_sample": "This agreement is entered into...", "note": ""}
     ],
     "language_summary": {
-      "en": {"units_dominant": 10, "pct_of_processed_units": 83.3, "avg_confidence": 0.97},
-      "zh-cn": {"units_dominant": 2, "pct_of_processed_units": 16.7, "avg_confidence": 0.93}
+      "en": {"units_dominant": 10, "pct_of_processed_units": 83.3, "avg_confidence": 0.97, "scripts": ["Latin"]},
+      "zh-cn": {"units_dominant": 2, "pct_of_processed_units": 16.7, "avg_confidence": 0.93, "scripts": ["Han"]}
     },
     "warnings": []
   },
-  "error": null
+  "error": null,
+  "total_units": 12,
+  "pages": [ /* same 12 entries, kept around after completion too */ ]
 }
 ```
 A 404 on this endpoint means the job expired (results are kept 1 hour) or
