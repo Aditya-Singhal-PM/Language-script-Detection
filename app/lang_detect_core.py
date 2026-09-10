@@ -45,10 +45,34 @@ except ImportError:
 
 # Scripts that map to exactly one language (no further disambiguation
 # needed once OSD tells us the script).
+# Scripts that map to exactly one plausible language, so once OSD names
+# the script the language is settled (langdetect still refines the few
+# cases where one script serves several languages).
+#
+# CRITICAL: these keys must be the labels Tesseract's OSD *actually emits
+# at runtime*, which are NOT always the Unicode script name you'd expect.
+# Verified empirically against generated samples for every major script
+# (see verify_osd_scripts.py, which reproduces the check):
+#   - Korean text -> OSD emits "Korean", NOT "Hangul"
+#   - Japanese    -> OSD emits "Japanese" (handled separately below)
+#   - Chinese     -> OSD emits "Han"
+# Both spellings are kept where builds may differ. Getting this wrong is
+# silent and nasty: an unhandled label falls through to the Latin branch,
+# gets OCR'd with a Latin-alphabet model, and yields confident-looking
+# garbage in some random European language rather than an honest failure.
 SINGLE_LANG_SCRIPTS = {
-    "Hangul": "kor",
-    "Cyrillic": "rus",
-    "Devanagari": "hin",
+    "Korean": "kor",
+    "Hangul": "kor",          # alias; kept in case a build emits this instead
+    "Cyrillic": "rus",        # also ua/bg/sr - langdetect refines from the text
+    "Devanagari": "hin",      # also mr/ne - langdetect refines from the text
+    "Greek": "ell",
+    "Hebrew": "heb",
+    "Thai": "tha",
+    "Bengali": "ben",         # also Assamese
+    "Tamil": "tam",
+    "Telugu": "tel",
+    "Kannada": "kan",
+    "Malayalam": "mal",
 }
 
 # Latin script is ambiguous across many languages, but Tesseract's
@@ -180,18 +204,28 @@ def _script_char_ratio(text: str, script: str) -> float:
     Used to classify short blocks where OSD refuses to run."""
     if not text:
         return 0.0
-    if script in ("Han", "Japanese"):
-        # Japanese text is Han (kanji) plus kana - count both ranges so
-        # the probe doesn't undercount a kana-heavy sample.
-        match = sum(1 for c in text if 0x4E00 <= ord(c) <= 0x9FFF or 0x3040 <= ord(c) <= 0x30FF)
-    elif script == "Hangul":
-        match = sum(1 for c in text if 0xAC00 <= ord(c) <= 0xD7A3)
-    elif script == "Arabic":
-        match = sum(1 for c in text if 0x0600 <= ord(c) <= 0x06FF)
-    elif script == "Cyrillic":
-        match = sum(1 for c in text if 0x0400 <= ord(c) <= 0x04FF)
-    elif script == "Devanagari":
-        match = sum(1 for c in text if 0x0900 <= ord(c) <= 0x097F)
+    ranges = {
+        # Japanese is Han (kanji) plus kana - count both so a kana-heavy
+        # sample isn't undercounted.
+        "Han": [(0x4E00, 0x9FFF), (0x3040, 0x30FF)],
+        "Japanese": [(0x4E00, 0x9FFF), (0x3040, 0x30FF)],
+        "Korean": [(0xAC00, 0xD7A3), (0x1100, 0x11FF)],
+        "Hangul": [(0xAC00, 0xD7A3), (0x1100, 0x11FF)],
+        "Arabic": [(0x0600, 0x06FF), (0x0750, 0x077F)],
+        "Cyrillic": [(0x0400, 0x04FF)],
+        "Devanagari": [(0x0900, 0x097F)],
+        "Greek": [(0x0370, 0x03FF), (0x1F00, 0x1FFF)],
+        "Hebrew": [(0x0590, 0x05FF)],
+        "Thai": [(0x0E00, 0x0E7F)],
+        "Bengali": [(0x0980, 0x09FF)],
+        "Tamil": [(0x0B80, 0x0BFF)],
+        "Telugu": [(0x0C00, 0x0C7F)],
+        "Kannada": [(0x0C80, 0x0CFF)],
+        "Malayalam": [(0x0D00, 0x0D7F)],
+    }
+    if script in ranges:
+        spans = ranges[script]
+        match = sum(1 for c in text if any(lo <= ord(c) <= hi for lo, hi in spans))
     else:  # Latin / default
         match = sum(1 for c in text if c.isalpha() and ord(c) < 0x250)
     return match / max(len(text), 1)
@@ -200,29 +234,49 @@ def _script_char_ratio(text: str, script: str) -> float:
 def resolve_block_script(block_image: Image.Image, page_script: Optional[str]) -> Optional[str]:
     """Get a block's script, falling back to a cheap Unicode-composition
     probe when OSD can't decide (common on short/single-line blocks like
-    headings). This is what stops a short heading in a different script
-    from the page's body text silently inheriting the body's script."""
+    headings). This is what lets a short heading in a different script
+    from the page body be detected, rather than silently inheriting the
+    body's script.
+
+    The probe is deliberately biased TOWARD the page's own script. The
+    reason: running the English model over non-Latin text produces
+    Latin-looking noise that scores well on the "is this Latin?" ratio
+    test, so a naive highest-ratio-wins comparison hands almost every
+    block to Latin and wrecks whole-page detection for Tamil, Thai,
+    Greek, etc. The page-level OSD call had the whole page's worth of
+    characters to work with and is much stronger evidence than a probe
+    on one small crop, so Latin has to clearly beat it - not merely tie -
+    before we override.
+    """
     script = detect_script(block_image)
     if script:
         return script
 
-    candidates: dict[str, str] = {"Latin": "eng"}
-    if page_script and page_script != "Latin":
-        probe_lang = {"Han": "chi_sim", "Japanese": "jpn"}.get(page_script) or SINGLE_LANG_SCRIPTS.get(page_script)
-        if probe_lang:
-            candidates[page_script] = probe_lang
+    if not page_script or page_script == "Latin":
+        # Nothing better to compare against; just check whether this
+        # block looks Latin at all.
+        text = _safe_ocr(block_image, "eng")
+        return "Latin" if _script_char_ratio(text, "Latin") >= 0.5 else page_script
 
-    best_script, best_ratio = None, 0.0
-    for cand_script, tess_lang in candidates.items():
-        text = _safe_ocr(block_image, tess_lang)
-        ratio = _script_char_ratio(text, cand_script)
-        if ratio > best_ratio:
-            best_script, best_ratio = cand_script, ratio
+    page_probe_lang = {"Han": "chi_sim", "Japanese": "jpn"}.get(page_script) or SINGLE_LANG_SCRIPTS.get(page_script)
+    if not page_probe_lang:
+        return page_script
 
-    # Require a reasonable majority before trusting the probe; otherwise
-    # fall back to the page's script rather than guessing on noise.
-    if best_script and best_ratio >= 0.5:
-        return best_script
+    page_text = _safe_ocr(block_image, page_probe_lang)
+    page_ratio = _script_char_ratio(page_text, page_script)
+
+    # If the block reads convincingly as the page's script, we're done -
+    # don't even consider Latin.
+    if page_ratio >= 0.35:
+        return page_script
+
+    # Only now consider Latin, and require it to be both strong in
+    # absolute terms and clearly better than the page-script reading.
+    latin_text = _safe_ocr(block_image, "eng")
+    latin_ratio = _script_char_ratio(latin_text, "Latin")
+    if latin_ratio >= 0.6 and latin_ratio > page_ratio + 0.25:
+        return "Latin"
+
     return page_script
 
 
@@ -461,6 +515,8 @@ _TESS_TO_ISO = {
     "eng": "en", "fra": "fr", "deu": "de", "spa": "es",
     "chi_sim": "zh-cn", "chi_tra": "zh-tw", "jpn": "ja", "kor": "ko",
     "ara": "ar", "rus": "ru", "hin": "hi",
+    "ell": "el", "heb": "he", "tha": "th", "ben": "bn",
+    "tam": "ta", "tel": "te", "kan": "kn", "mal": "ml",
 }
 
 
