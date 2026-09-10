@@ -111,6 +111,14 @@
     80%, 100% { content: '...'; }
   }
 
+  #processing .elapsed {
+    display: block;
+    margin-top: 8px;
+    font-size: 12px;
+    color: var(--ink-soft);
+    opacity: 0.7;
+  }
+
   /* Error */
   #errorBox {
     display: none;
@@ -162,8 +170,9 @@
 
   .lang-name {
     display: flex;
-    align-items: baseline;
-    gap: 10px;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
   }
 
   .lang-swatch {
@@ -177,6 +186,16 @@
     font-family: 'IBM Plex Mono', monospace;
     font-size: 13px;
     color: var(--ink-soft);
+  }
+
+  .script-badge {
+    font-family: 'IBM Plex Mono', monospace;
+    font-size: 11px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-radius: 3px;
+    padding: 2px 7px;
+    letter-spacing: 0.02em;
   }
 
   .lang-pct {
@@ -276,7 +295,10 @@
       <input type="file" id="fileInput" accept=".pdf,.docx">
     </div>
 
-    <div id="processing"><span class="dots">Reading and analyzing document</span></div>
+    <div id="processing">
+      <span class="dots">Reading and analyzing document</span>
+      <span class="elapsed" id="elapsedTime"></span>
+    </div>
     <div id="errorBox"></div>
 
     <div id="results">
@@ -322,28 +344,88 @@ function resetUI() {
   fileInput.value = '';
 }
 
+const POLL_INTERVAL_MS = 2500;
+const MAX_POLL_MINUTES = 20; // give up after this long and show an error rather than polling forever
+
+let pollTimer = null;
+let elapsedTimer = null;
+
 async function handleFile(file) {
   dropzone.style.display = 'none';
   errorBox.style.display = 'none';
   results.style.display = 'none';
   processing.style.display = 'block';
+  startElapsedClock();
 
   const formData = new FormData();
   formData.append('file', file);
 
+  let submitData;
   try {
     const res = await fetch('/api/analyze', { method: 'POST', body: formData });
-    const data = await res.json();
-    processing.style.display = 'none';
-
+    submitData = await res.json();
     if (!res.ok) {
-      showError(data.detail || 'Something went wrong analyzing this document.');
+      stopProcessing();
+      showError(submitData.detail || 'Something went wrong submitting this document.');
       return;
     }
-    renderResults(data);
   } catch (err) {
-    processing.style.display = 'none';
+    stopProcessing();
     showError('Could not reach the analysis service. Check your connection and try again.');
+    return;
+  }
+
+  pollJob(submitData.job_id, Date.now());
+}
+
+function startElapsedClock() {
+  const startedAt = Date.now();
+  const elapsedEl = document.getElementById('elapsedTime');
+  elapsedTimer = setInterval(() => {
+    const secs = Math.floor((Date.now() - startedAt) / 1000);
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    elapsedEl.textContent = m > 0 ? `${m}m ${s}s elapsed` : `${s}s elapsed`;
+  }, 1000);
+}
+
+function stopProcessing() {
+  processing.style.display = 'none';
+  if (pollTimer) clearTimeout(pollTimer);
+  if (elapsedTimer) clearInterval(elapsedTimer);
+}
+
+async function pollJob(jobId, startedAt) {
+  if (Date.now() - startedAt > MAX_POLL_MINUTES * 60 * 1000) {
+    stopProcessing();
+    showError(`Still processing after ${MAX_POLL_MINUTES} minutes \u2014 this document may be unusually large. Try again, or check with whoever manages the server.`);
+    return;
+  }
+
+  try {
+    const res = await fetch(`/api/jobs/${jobId}`);
+    if (res.status === 404) {
+      stopProcessing();
+      showError('The analysis job expired or the server restarted. Please try uploading again.');
+      return;
+    }
+    const data = await res.json();
+
+    if (data.status === 'processing') {
+      pollTimer = setTimeout(() => pollJob(jobId, startedAt), POLL_INTERVAL_MS);
+      return;
+    }
+    if (data.status === 'error') {
+      stopProcessing();
+      showError(data.error || 'Something went wrong analyzing this document.');
+      return;
+    }
+    // status === 'done'
+    stopProcessing();
+    renderResults(data.result);
+  } catch (err) {
+    // Transient network hiccup during polling - retry rather than failing immediately.
+    pollTimer = setTimeout(() => pollJob(jobId, startedAt), POLL_INTERVAL_MS);
   }
 }
 
@@ -375,11 +457,16 @@ function renderResults(data) {
     seg.style.background = color;
     bar.appendChild(seg);
 
+    const scriptBadges = (stats.scripts || [])
+      .map(s => `<span class="script-badge">${s}</span>`)
+      .join(' ');
+
     const li = document.createElement('li');
     li.innerHTML = `
       <span class="lang-name">
         <span class="lang-swatch" style="background:${color}"></span>
         ${languageDisplayName(lang)} <span class="lang-code">${lang}</span>
+        ${scriptBadges}
       </span>
       <span>
         <span class="lang-pct">${stats.pct_of_processed_units}%</span>
