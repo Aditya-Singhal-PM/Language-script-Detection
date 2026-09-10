@@ -69,9 +69,21 @@ job_store = get_job_store()
 
 def _run_analysis_job(job_id: str, tmp_path: str, tmp_dir: str, original_filename: str):
     """Runs in a background thread. Never raises - always writes a
-    status into the job store so the poller has something to see."""
+    status into the job store so the poller has something to see.
+
+    Reports progress as it goes (total unit count as soon as it's known,
+    then each page/chunk's result as it finishes) rather than only
+    writing once at the very end - that's what lets the frontend show
+    live per-page results instead of a blank spinner for the whole
+    duration of a multi-minute OCR run."""
     try:
-        report = analyze_document(tmp_path)
+        def on_total(n):
+            job_store.set_total_units(job_id, n)
+
+        def on_page(page_result):
+            job_store.append_page_result(job_id, asdict(page_result))
+
+        report = analyze_document(tmp_path, on_total_known=on_total, on_page_done=on_page)
         result = asdict(report)
         result["file_path"] = original_filename
         job_store.set_done(job_id, result)
@@ -125,7 +137,13 @@ def get_job(job_id: str):
     job = job_store.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found (it may have expired, or the server restarted).")
-    return {"status": job["status"], "result": job["result"], "error": job["error"]}
+    return {
+        "status": job["status"],
+        "result": job["result"],
+        "error": job["error"],
+        "total_units": job.get("total_units"),
+        "pages": job.get("pages", []),
+    }
 
 
 # Serve the frontend last so it doesn't shadow the /api routes above.

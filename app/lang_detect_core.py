@@ -571,9 +571,17 @@ def densify_gaps(sampled_results: list[PageResult], total_pages: int) -> list[in
 # Top-level orchestration
 # ---------------------------------------------------------------------------
 
-def analyze_pdf(file_path: str) -> DocumentReport:
+def analyze_pdf(file_path: str, on_total_known=None, on_page_done=None) -> DocumentReport:
+    """on_total_known(total_pages) fires once, as soon as the page count
+    is known (before any processing). on_page_done(PageResult) fires once
+    per page as it finishes - including the extra pages processed during
+    adaptive densification. Both are optional; used by the web app to
+    stream live progress to the frontend instead of leaving the person
+    watching a static spinner for however long OCR takes."""
     doc = open_pdf(file_path)
     total_pages = doc.page_count
+    if on_total_known:
+        on_total_known(total_pages)
     warnings = []
 
     sample_pages = choose_sample_pages(total_pages)
@@ -586,6 +594,8 @@ def analyze_pdf(file_path: str) -> DocumentReport:
         else:
             image = render_page_to_image(page)
             results[page_num] = process_scanned_page(page_num, image)
+        if on_page_done:
+            on_page_done(results[page_num])
 
     for p in sample_pages:
         process(p)
@@ -613,23 +623,32 @@ def analyze_pdf(file_path: str) -> DocumentReport:
     )
 
 
-def analyze_docx(file_path: str) -> DocumentReport:
+def analyze_docx(file_path: str, on_total_known=None, on_page_done=None) -> DocumentReport:
     """DOCX has no 'scanned' concept — text is always native. We chunk by
     paragraph-ish blocks (split on blank lines) and detect per chunk so a
     bilingual document (e.g. an English cover memo + Chinese appendix
-    pasted in as text) still gets both languages surfaced."""
+    pasted in as text) still gets both languages surfaced.
+
+    See analyze_pdf for what on_total_known/on_page_done are for."""
     text = get_docx_text(file_path)
-    chunks = [c.strip() for c in re.split(r"\n{1,}", text) if c.strip()]
+    raw_chunks = [c.strip() for c in re.split(r"\n{1,}", text) if c.strip()]
+    # total is known immediately here, unlike a PDF where sampling means
+    # we don't necessarily touch every page - report the count of chunks
+    # actually worth analyzing (skips ones below the length threshold).
+    chunks = [c for c in raw_chunks if len(c) >= MIN_TEXT_LEN_FOR_DETECTION]
+    if on_total_known:
+        on_total_known(len(chunks) or 1)
 
     results = []
     for i, chunk in enumerate(chunks, start=1):
-        if len(chunk) < MIN_TEXT_LEN_FOR_DETECTION:
-            continue
         try:
             langs = [(r.lang, r.prob) for r in detect_langs(chunk)]
         except LangDetectException:
             langs = []
-        results.append(PageResult(page_num=i, source="native_text", languages=langs, text_sample=chunk[:200]))
+        pr = PageResult(page_num=i, source="native_text", languages=langs, text_sample=chunk[:200])
+        results.append(pr)
+        if on_page_done:
+            on_page_done(pr)
 
     summary = summarize_languages(results, total_units=len(results) or 1)
     return DocumentReport(
@@ -674,11 +693,11 @@ def summarize_languages(results: list[PageResult], total_units: int) -> dict:
     return dict(sorted(summary.items(), key=lambda x: -x[1]["units_dominant"]))
 
 
-def analyze_document(file_path: str) -> DocumentReport:
+def analyze_document(file_path: str, on_total_known=None, on_page_done=None) -> DocumentReport:
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".pdf":
-        return analyze_pdf(file_path)
+        return analyze_pdf(file_path, on_total_known, on_page_done)
     elif ext in (".docx",):
-        return analyze_docx(file_path)
+        return analyze_docx(file_path, on_total_known, on_page_done)
     else:
         raise ValueError(f"Unsupported file type: {ext} (expected .pdf or .docx)")

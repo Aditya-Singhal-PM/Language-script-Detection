@@ -37,8 +37,18 @@ class InMemoryJobStore:
         with self._lock:
             self._jobs[job_id] = {
                 "status": "processing", "result": None, "error": None,
-                "created_at": time.time(),
+                "created_at": time.time(), "total_units": None, "pages": [],
             }
+
+    def set_total_units(self, job_id: str, total: int) -> None:
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id]["total_units"] = total
+
+    def append_page_result(self, job_id: str, page_result: dict) -> None:
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id]["pages"].append(page_result)
 
     def set_done(self, job_id: str, result: dict) -> None:
         with self._lock:
@@ -98,8 +108,16 @@ class FirestoreJobStore:
     def create(self, job_id: str) -> None:
         self._doc(job_id).set({
             "status": "processing", "result": None, "error": None,
-            "created_at": time.time(),
+            "created_at": time.time(), "total_units": None, "pages": [],
         })
+
+    def set_total_units(self, job_id: str, total: int) -> None:
+        self._doc(job_id).update({"total_units": total})
+
+    def append_page_result(self, job_id: str, page_result: dict) -> None:
+        # ArrayUnion is an atomic server-side append - no read-modify-write
+        # race even if something else touched this doc concurrently.
+        self._doc(job_id).update({"pages": self._firestore.ArrayUnion([page_result])})
 
     def set_done(self, job_id: str, result: dict) -> None:
         self._doc(job_id).update({"status": "done", "result": result})
