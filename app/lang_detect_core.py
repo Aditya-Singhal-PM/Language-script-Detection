@@ -96,8 +96,9 @@ SAMPLE_STRIDE = 10
 class PageResult:
     page_num: int  # 1-indexed
     source: str  # "native_text" | "ocr"
-    script: Optional[str] = None  # dominant script if OCR'd
+    script: Optional[str] = None  # whole-page dominant script if OCR'd (may not match every language on a mixed page - see language_scripts)
     languages: list[tuple[str, float]] = field(default_factory=list)  # [(lang, prob), ...]
+    language_scripts: dict = field(default_factory=dict)  # lang -> script actually used to OCR the block(s) that produced it. More precise than `script` on a mixed-script page.
     text_sample: str = ""
     note: str = ""
 
@@ -179,8 +180,10 @@ def _script_char_ratio(text: str, script: str) -> float:
     Used to classify short blocks where OSD refuses to run."""
     if not text:
         return 0.0
-    if script == "Han":
-        match = sum(1 for c in text if 0x4E00 <= ord(c) <= 0x9FFF)
+    if script in ("Han", "Japanese"):
+        # Japanese text is Han (kanji) plus kana - count both ranges so
+        # the probe doesn't undercount a kana-heavy sample.
+        match = sum(1 for c in text if 0x4E00 <= ord(c) <= 0x9FFF or 0x3040 <= ord(c) <= 0x30FF)
     elif script == "Hangul":
         match = sum(1 for c in text if 0xAC00 <= ord(c) <= 0xD7A3)
     elif script == "Arabic":
@@ -205,7 +208,7 @@ def resolve_block_script(block_image: Image.Image, page_script: Optional[str]) -
 
     candidates: dict[str, str] = {"Latin": "eng"}
     if page_script and page_script != "Latin":
-        probe_lang = {"Han": "chi_sim"}.get(page_script) or SINGLE_LANG_SCRIPTS.get(page_script)
+        probe_lang = {"Han": "chi_sim", "Japanese": "jpn"}.get(page_script) or SINGLE_LANG_SCRIPTS.get(page_script)
         if probe_lang:
             candidates[page_script] = probe_lang
 
@@ -285,6 +288,17 @@ def ocr_and_resolve_language(image: Image.Image, script: str) -> tuple[str, str,
     """OCR a single block/page image and resolve it to an ISO-ish language
     code, using the cheapest reliable method for that script. Returns
     (lang_code, ocr_text, confidence)."""
+
+    if script == "Japanese":
+        # OSD already told us directly it's Japanese (a separate, more
+        # specific label than "Han" - Tesseract uses this when the
+        # glyph shapes look like Japanese typeface/kanji conventions,
+        # sometimes even without kana present). Trust it and OCR
+        # directly with the Japanese model rather than routing through
+        # the Han/kana-check path.
+        text = _safe_ocr(image, "jpn")
+        conf = _langdetect_confidence(text) if len(text.strip()) >= MIN_TEXT_LEN_CJK else (0.9 if text.strip() else 0.0)
+        return "ja", text, conf
 
     if script == "Han":
         # Pass A: OCR with the Chinese model - it reads Han glyphs
@@ -388,7 +402,7 @@ def process_scanned_page(page_num: int, image: Image.Image) -> PageResult:
     # Page-level script (used for reporting / fallback if per-block OSD fails).
     page_script = detect_script(image)
 
-    block_lang_results: list[tuple[str, float, int]] = []  # (lang, conf, char_count)
+    block_lang_results: list[tuple[str, float, int, str]] = []  # (lang, conf, char_count, script)
     combined_text_parts = []
     any_block_had_text = False
 
@@ -401,7 +415,7 @@ def process_scanned_page(page_num: int, image: Image.Image) -> PageResult:
             any_block_had_text = True
             combined_text_parts.append(text)
         if lang:
-            block_lang_results.append((lang, conf, len(text)))
+            block_lang_results.append((lang, conf, len(text), block_script))
 
     if page_script is None and not block_lang_results:
         return PageResult(page_num=page_num, source="ocr", note="OSD could not determine script (poor scan quality?)")
@@ -413,10 +427,16 @@ def process_scanned_page(page_num: int, image: Image.Image) -> PageResult:
 
     # Aggregate block-level language votes into a page-level distribution,
     # weighted by how much text each language accounted for (so a 2-word
-    # heading doesn't outvote a 40-word body paragraph).
+    # heading doesn't outvote a 40-word body paragraph). Also track which
+    # script actually produced each language - on a mixed page (e.g. a
+    # Latin heading over a Han body), the page's overall OSD script alone
+    # would misleadingly attribute the WRONG script to one of the
+    # languages, so this is tracked per-language, not just per-page.
     lang_weighted: dict[str, list[tuple[float, int]]] = {}
-    for lang, conf, char_count in block_lang_results:
+    lang_to_scripts: dict[str, set] = {}
+    for lang, conf, char_count, block_script in block_lang_results:
         lang_weighted.setdefault(lang, []).append((conf, char_count))
+        lang_to_scripts.setdefault(lang, set()).add(block_script)
 
     aggregated = []
     for lang, entries in lang_weighted.items():
@@ -425,12 +445,14 @@ def process_scanned_page(page_num: int, image: Image.Image) -> PageResult:
         aggregated.append((lang, weighted_conf, total_chars))
     aggregated.sort(key=lambda x: -x[2])  # order by amount of text, most first
     languages = [(lang, conf) for lang, conf, _ in aggregated]
+    language_scripts = {lang: sorted(scripts)[0] for lang, scripts in lang_to_scripts.items()}
 
     return PageResult(
         page_num=page_num,
         source="ocr",
         script=page_script,
         languages=languages,
+        language_scripts=language_scripts,
         text_sample=" ".join(combined_text_parts)[:200],
     )
 
@@ -566,13 +588,23 @@ def analyze_docx(file_path: str) -> DocumentReport:
 def summarize_languages(results: list[PageResult], total_units: int) -> dict:
     """Aggregate per-page/chunk language calls into a document-level
     summary: for each language, how many units it appeared as dominant in,
-    the % of processed units, and average confidence."""
+    the % of processed units, average confidence, and which script(s)
+    (Latin, Han, Japanese, ...) it was recognized from. Uses each page's
+    language_scripts mapping (accurate per-language, even on a mixed
+    page) rather than the page's single overall `script` field, which
+    would misattribute the wrong script to one language on a mixed page.
+    Native-text pages (no OCR involved) have no script at all, so those
+    units just don't contribute to the scripts list."""
     lang_hits: dict[str, list[float]] = {}
+    lang_scripts: dict[str, set] = {}
     for r in results:
         if not r.languages:
             continue
         top_lang, top_prob = r.languages[0]
         lang_hits.setdefault(top_lang, []).append(top_prob)
+        script_for_this_lang = r.language_scripts.get(top_lang) or r.script
+        if script_for_this_lang:
+            lang_scripts.setdefault(top_lang, set()).add(script_for_this_lang)
 
     processed = len(results) or 1
     summary = {}
@@ -581,6 +613,7 @@ def summarize_languages(results: list[PageResult], total_units: int) -> dict:
             "units_dominant": len(confs),
             "pct_of_processed_units": round(100 * len(confs) / processed, 1),
             "avg_confidence": round(statistics.mean(confs), 3),
+            "scripts": sorted(lang_scripts.get(lang, set())),
         }
     return dict(sorted(summary.items(), key=lambda x: -x[1]["units_dominant"]))
 
