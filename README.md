@@ -28,40 +28,105 @@ Open http://localhost:8000.
 
 ## API
 
+The API is job-based, not a single blocking request — scanned, multi-page,
+multi-language documents (especially anything that triggers the Japanese
+kana-check double-OCR pass) can take minutes, which is a poor fit for a
+synchronous HTTP request. Submit a document, get a `job_id` back
+immediately, then poll for the result.
+
 ### `POST /api/analyze`
 Multipart upload, field name `file`. Accepts `.pdf` or `.docx`, 25 MB max.
+Returns immediately (HTTP 202) with a job id — does not wait for analysis
+to finish.
 
 ```bash
-curl -X POST http://localhost:8000/api/analyze \
-  -F "file=@contract.pdf"
+curl -X POST http://localhost:8000/api/analyze -F "file=@contract.pdf"
+# => {"job_id": "b88ed778f3d44037a162c327bb8d3bd2"}
 ```
 
-Response:
+### `GET /api/jobs/{job_id}`
+Poll this until `status` is `done` or `error`.
+
+```bash
+curl http://localhost:8000/api/jobs/b88ed778f3d44037a162c327bb8d3bd2
+```
 ```json
 {
-  "file_path": "contract.pdf",
-  "total_pages": 12,
-  "pages_processed": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-  "page_results": [
-    {
-      "page_num": 1,
-      "source": "native_text",
-      "script": null,
-      "languages": [["en", 0.999]],
-      "text_sample": "This agreement is entered into...",
-      "note": ""
-    }
-  ],
-  "language_summary": {
-    "en": {"units_dominant": 10, "pct_of_processed_units": 83.3, "avg_confidence": 0.97},
-    "zh-cn": {"units_dominant": 2, "pct_of_processed_units": 16.7, "avg_confidence": 0.93}
-  },
-  "warnings": []
+  "status": "processing",
+  "result": null,
+  "error": null
 }
 ```
+Once finished:
+```json
+{
+  "status": "done",
+  "result": {
+    "file_path": "contract.pdf",
+    "total_pages": 12,
+    "pages_processed": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    "page_results": [
+      {"page_num": 1, "source": "native_text", "script": null,
+       "languages": [["en", 0.999]], "text_sample": "This agreement is entered into...", "note": ""}
+    ],
+    "language_summary": {
+      "en": {"units_dominant": 10, "pct_of_processed_units": 83.3, "avg_confidence": 0.97},
+      "zh-cn": {"units_dominant": 2, "pct_of_processed_units": 16.7, "avg_confidence": 0.93}
+    },
+    "warnings": []
+  },
+  "error": null
+}
+```
+A 404 on this endpoint means the job expired (results are kept 1 hour) or
+the server instance restarted — re-submit the document.
 
 ### `GET /api/health`
 Returns `{"status": "ok"}` — for load balancer / deploy-platform health checks.
+
+### Cloud Run specific setting this requires
+
+By default, Cloud Run only allocates CPU to an instance **while it's
+actively handling a request**. This app's background analysis work keeps
+running *after* `/api/analyze` returns its response — which means it can
+get starved of CPU between the frontend's poll requests unless you enable:
+
+**Service settings → Edit & Deploy New Revision → Resources/Billing → CPU
+allocation → "CPU is always allocated"** (instead of the default "CPU is
+only allocated during request processing").
+
+This doesn't apply on Render, Fly.io, or a plain VM/Docker host — it's a
+Cloud Run-only restriction.
+
+### Multi-instance deployments (max-instances > 1)
+
+The job store is pluggable for exactly this reason — see `app/job_store.py`.
+By default (`JOB_STORE_BACKEND` unset or `memory`), jobs live in an
+in-memory dict, which only works correctly when the service runs as a
+single instance. With more than one instance, Cloud Run's load balancer
+doesn't pin a client to the instance that's processing their job, so a
+poll request landing on a *different* instance would incorrectly 404 a
+job that's actually still running fine elsewhere.
+
+To fix this, set `JOB_STORE_BACKEND=firestore` (as an env var on the
+Cloud Run service) once you raise max-instances above 1. One-time setup:
+
+1. In the Cloud Console, go to **Firestore** → **Create Database** →
+   Native mode → pick a region (ideally the same one as your Cloud Run
+   service).
+2. On the Cloud Run service, add environment variable
+   `JOB_STORE_BACKEND=firestore` (Edit & Deploy New Revision →
+   Variables & Secrets).
+3. No credential setup needed — Cloud Run's attached service account
+   authenticates to Firestore automatically. (Testing the Firestore
+   backend locally would need `gcloud auth application-default login`
+   first, or a service account key via `GOOGLE_APPLICATION_CREDENTIALS`.)
+
+This is free at this scale (Firestore's Always Free tier: 50K reads/20K
+writes per day), and every instance now sees the same job status instead
+of each holding its own private copy.
+
+
 
 ## Deploying
 
@@ -77,6 +142,11 @@ For a plain VM: `docker run -d -p 80:8000 --restart unless-stopped doc-lang-app`
 
 ## What's not done yet
 
+- **Firestore backend is untested from my end** — the code follows
+  Firestore's documented client API correctly, but I don't have network
+  access to Google's APIs in this sandbox to actually run it. Test it
+  against a real Firestore database before relying on it for anything
+  important.
 - **No visual QA on the frontend** — it renders and served correctly in
   testing, but I couldn't load it in an actual browser from this
   environment. Worth a quick look once deployed before sharing it
@@ -84,10 +154,23 @@ For a plain VM: `docker run -d -p 80:8000 --restart unless-stopped doc-lang-app`
 - **No auth/rate-limiting** — fine for an internal tool behind your
   company network or VPN; add an API key check in `app/main.py` before
   exposing it publicly.
-- **In-memory, stateless** — each request is processed and discarded; no
-  history/database. Fine for a quick tool, add persistence if you want a
-  record of past analyses.
-- Same known limitations as the CLI version (Arabic untested end-to-end,
-  Simplified/Traditional Chinese heuristic is lightweight, free Tesseract
-  vs. cloud OCR accuracy tradeoff) — see the OCR routing logic in
-  `app/lang_detect_core.py` for where a cloud OCR provider would slot in.
+- **No history/database of past analyses** — each job is discarded after
+  its TTL. Fine for a quick tool; add persistence if you want a record.
+- Arabic routing is implemented per the design but still untested
+  end-to-end (no Arabic-capable font was available to generate a
+  synthetic sample) — test against a real Arabic document before relying
+  on it. **Update:** the Japanese-vs-Chinese script routing *was*
+  incorrectly untested in the same way, and it turned out to have a real
+  bug (Tesseract's OSD reports a page as `"Japanese"` as its own distinct
+  label, separate from `"Han"` — the code only ever checked for `"Han"`,
+  so Japanese pages silently fell through to the Latin-language OCR path
+  and produced confident-looking garbage in German/Hungarian/Catalan).
+  Found and fixed once tested against a real scanned Japanese contract.
+  Worth remembering as a pattern: synthetic test images are useful but
+  don't reliably exercise every code path a real scan will.
+- Simplified vs. Traditional Chinese detection is a lightweight
+  character-set heuristic, not exhaustive.
+- Free Tesseract accuracy on poor-quality/faint scans will be
+  noticeably below a cloud OCR provider (Google Vision / Azure Document
+  Intelligence) — see `_safe_ocr` in `app/lang_detect_core.py` for where
+  that would slot in.
